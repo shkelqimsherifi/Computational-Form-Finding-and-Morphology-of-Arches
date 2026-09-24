@@ -9,14 +9,23 @@ win on shallow arcs purely from its extra free parameter), and writes a
 summary results table.
 
 USAGE:
-    1. Put all your arch_run{N}_{loadtype}_g{val}_k{val}.csv files in one folder.
+    1. Put all your arch CSVs in one folder.
     2. Edit FOLDER below to point to that folder.
-    3. Run:  python classify_arches.py
+    3. Run:  python classify_arches_asymmetric.py
     4. Look for results_summary.csv in the same folder.
 
-Expected filename format:
-    arch_run24.0_0_g-0.1_k10.0.csv
+Expected filename formats:
+    Uniform / central-point:
+        arch_run24.0_0_g-0.1_k10.0.csv
+        arch_run24.0_1_g-0.1_k10.0.csv
+
+    Asymmetric (recommended):
+        arch_run24.0_2_gL-0.1_gR-0.5_k10.0.csv
+
     loadtype code: 0 = uniform, 1 = central_point, 2 = asymmetric
+
+For asymmetric loading, gL and gR are parsed separately and written to the
+summary as gL_val, gR_val, and load_parameter.
 
 Expected CSV format (as produced by your Grasshopper Python export):
     x,y,z
@@ -159,24 +168,48 @@ def fit_model(name, func, k, x, z):
 
 
 def parse_filename(filename):
-    """Pull N, loadtype, g, k out of a filename like
-    arch_run24.0_0_g-0.1_k10.0.csv
-    Returns (N, loadtype_code, loadtype_label, g_val, k_val).
-    Any field that fails to parse comes back as None.
+    """Parse N, load type, load parameter(s), and k from filename.
+
+    Uniform / central-point:
+        arch_run24.0_0_g-0.1_k10.0.csv
+        -> g_val = -0.1
+
+    Asymmetric:
+        arch_run24.0_2_gL-0.1_gR-0.5_k10.0.csv
+        -> gL_val = -0.1, gR_val = -0.5
+
+    Returns:
+        N, loadtype_code, loadtype_label, g_val, gL_val, gR_val, k_val
     """
-    m = re.search(
-        r"arch_run(?P<N>-?\d+\.?\d*)_(?P<loadtype>\d+)_g(?P<g>-?\d+\.?\d*)_k(?P<k>-?\d+\.?\d*)",
-        filename,
-    )
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    m = re.match(r"^arch_run(?P<N>-?\d+(?:\.\d+)?)_(?P<loadtype>\d+)_(?P<loadpart>.+)_k(?P<k>-?\d+(?:\.\d+)?)$", stem, re.I)
     if not m:
-        return None, None, None, None, None
+        return None, None, None, None, None, None, None
 
     N = float(m.group("N"))
     loadtype_code = m.group("loadtype")
     loadtype_label = LOADTYPE_MAP.get(loadtype_code, f"unknown({loadtype_code})")
-    g_val = float(m.group("g"))
+    loadpart = m.group("loadpart")
     k_val = float(m.group("k"))
-    return N, loadtype_code, loadtype_label, g_val, k_val
+
+    if loadtype_code == "2":
+        # Preferred: gL-0.1_gR-0.5
+        asym = re.search(r"gL(?P<gL>-?\d+(?:\.\d+)?)_gR(?P<gR>-?\d+(?:\.\d+)?)$", loadpart, re.I)
+        if not asym:
+            # Also accept g-0.1_gR-0.5
+            asym = re.search(r"g(?P<gL>-?\d+(?:\.\d+)?)_gR(?P<gR>-?\d+(?:\.\d+)?)$", loadpart, re.I)
+        if not asym:
+            # Also accept g-0.1_-0.5
+            asym = re.search(r"g(?P<gL>-?\d+(?:\.\d+)?)_(?P<gR>-?\d+(?:\.\d+)?)$", loadpart, re.I)
+        if asym:
+            return N, loadtype_code, loadtype_label, None, float(asym.group("gL")), float(asym.group("gR")), k_val
+        return N, loadtype_code, loadtype_label, None, None, None, k_val
+
+    g = re.fullmatch(r"g(?P<g>-?\d+(?:\.\d+)?)", loadpart, re.I)
+    if g:
+        return N, loadtype_code, loadtype_label, float(g.group("g")), None, None, k_val
+
+    return N, loadtype_code, loadtype_label, None, None, None, k_val
 
 
 def pick_best_model(fits):
@@ -231,16 +264,57 @@ def main():
         return
 
     rows = []
+    skipped = []
     for path in csv_paths:
         fname = os.path.basename(path)
-        df = pd.read_csv(path)
-        x = df["x"].to_numpy(dtype=float)
-        z = df["z"].to_numpy(dtype=float)
+
+        # --- Load + validate the CSV. Any problem here (empty/corrupt
+        # export, wrong columns, unreadable file, etc.) is logged and the
+        # file is skipped rather than crashing the whole batch. ---
+        try:
+            df = pd.read_csv(path)
+        except Exception as e:
+            print(f"SKIPPED {fname}: could not read CSV ({e})")
+            skipped.append((fname, f"read error: {e}"))
+            continue
+
+        # Normalize column names (strip whitespace, lowercase) so minor
+        # export inconsistencies like ' X' or 'X' still match.
+        df.columns = [str(c).strip().lower() for c in df.columns]
+
+        if "x" not in df.columns or "z" not in df.columns:
+            print(f"SKIPPED {fname}: missing 'x' or 'z' column "
+                  f"(found columns: {list(df.columns)})")
+            skipped.append((fname, f"missing x/z column, found {list(df.columns)}"))
+            continue
+
+        if len(df) < 4:
+            print(f"SKIPPED {fname}: only {len(df)} row(s), not enough points to fit")
+            skipped.append((fname, f"only {len(df)} row(s)"))
+            continue
+
+        try:
+            x = df["x"].to_numpy(dtype=float)
+            z = df["z"].to_numpy(dtype=float)
+        except Exception as e:
+            print(f"SKIPPED {fname}: could not parse x/z as numeric ({e})")
+            skipped.append((fname, f"non-numeric x/z: {e}"))
+            continue
+
+        if np.isnan(x).any() or np.isnan(z).any():
+            print(f"SKIPPED {fname}: x or z contains NaN values")
+            skipped.append((fname, "NaN in x/z"))
+            continue
 
         order = np.argsort(x)
         x, z = x[order], z[order]
 
-        N, loadtype_code, loadtype_label, g_val, k_val = parse_filename(fname)
+        N, loadtype_code, loadtype_label, g_val, gL_val, gR_val, k_val = parse_filename(fname)
+
+        if loadtype_code == "2" and (gL_val is None or gR_val is None):
+            print(f"WARNING: asymmetric file '{fname}' has no parseable gL/gR pair.")
+        elif loadtype_code in {"0", "1"} and g_val is None:
+            print(f"WARNING: {loadtype_label} file '{fname}' has no parseable g value.")
 
         fits = {name: fit_model(name, func, k, x, z) for name, (func, k) in MODELS.items()}
         best_name, decisive = pick_best_model(fits)
@@ -255,6 +329,9 @@ def main():
             "loadtype_code": loadtype_code,
             "loadtype": loadtype_label,
             "g_val": g_val,
+            "gL_val": gL_val,
+            "gR_val": gR_val,
+            "load_parameter": (f"{gL_val:g},{gR_val:g}" if loadtype_code == "2" and gL_val is not None and gR_val is not None else (f"{g_val:g}" if g_val is not None else None)),
             "k_val": k_val,
             "n_points": len(x),
             "span": round(span, 4),
@@ -278,7 +355,15 @@ def main():
     result_df = pd.DataFrame(rows)
     out_path = os.path.join(FOLDER, "results_summary.csv")
     result_df.to_csv(out_path, index=False)
-    print(f"\nSaved summary table: {out_path}")
+    print(f"\nSaved summary table: {out_path}  ({len(rows)} arch(es) classified)")
+
+    if skipped:
+        skipped_path = os.path.join(FOLDER, "skipped_files.csv")
+        pd.DataFrame(skipped, columns=["file", "reason"]).to_csv(skipped_path, index=False)
+        print(f"\n{len(skipped)} file(s) were skipped and NOT included in the summary:")
+        for fname, reason in skipped:
+            print(f"  - {fname}: {reason}")
+        print(f"Details written to: {skipped_path}")
 
 
 if __name__ == "__main__":

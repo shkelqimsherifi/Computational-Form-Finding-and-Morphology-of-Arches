@@ -1,0 +1,2 @@
+file,reason
+results_summary_final.csv,"missing x/z column, found ['file', 'n', 'loadtype_code', 'loadtype', 'g_val', 'k_val', 'n_points', 'span', 'depth', 'shallow_flag', 'best_fit', 'decisive', 'catenary_r2', 'catenary_aic', 'catenary_bic', 'parabolic_r2', 'parabolic_aic', 'parabolic_bic', 'elliptical_r2', 'elliptical_aic', 'elliptical_bic']"
