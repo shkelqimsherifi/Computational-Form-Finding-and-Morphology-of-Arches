@@ -578,16 +578,10 @@ The script will produce `results_summary.csv` in the same directory.
 
 ## Citation
 
-If you use this code or data in your research, please cite the accompanying paper:
+If you use this code or data in your research, please cite the paper:
 
 ```bibtex
-@article{mihajlovska2026formfinding,
-  title={Computational Form-Finding and the Morphology of Arches — From Hooke's Catenary to Parametric Simulation},
-  author={Mihajlovska, T. and Nikolovski, D. and Trombeva-Gavriloska, A. and Dimevska Sofronievska, L.},
-  journal={MDPI Buildings / Applied Sciences},
-  year={2026},
-  note={Special Issue: Computational Design and Digital Fabrication in Architecture}
-}
+
 ```
 
 ---
